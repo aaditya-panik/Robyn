@@ -146,7 +146,11 @@ class Router(BaseRouter):
         handler_param_names = set(handler_params.keys())
 
         unused_route_params = route_param_names - handler_param_names
-        if unused_route_params:
+        has_request_access = any(
+            p.annotation is Request or p.annotation is PathParams or p.name in ("r", "req", "request", "path_params")
+            for p in handler_params.values()
+        )
+        if unused_route_params and not has_request_access:
             _logger.warning(
                 "Route '%s' declares path params %s but handler '%s' doesn't use them",
                 endpoint,
