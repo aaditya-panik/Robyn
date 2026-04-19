@@ -2,12 +2,13 @@ import inspect
 import json
 import logging
 import re
+import types
 import typing
 from dataclasses import asdict, dataclass, field
 from importlib import resources
 from inspect import Signature
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Tuple, TypedDict, is_typeddict
+from typing import Any, Callable, Dict, List, Optional, Tuple, TypedDict, Union, is_typeddict
 
 from robyn.pydantic_support import get_pydantic_openapi_schema, is_pydantic_model
 from robyn.responses import html
@@ -423,38 +424,48 @@ class OpenAPI:
                 properties["type"] = type_mapping[type_name]
                 return properties
 
-        # Check if it's a generic type (like List[Object])
-        if hasattr(param_type, "__origin__"):
-            if param_type.__origin__ is list or param_type.__origin__ is List:
-                properties["type"] = "array"
-                # Handle the element type in the list
-                if hasattr(param_type, "__args__") and param_type.__args__:
-                    item_type = param_type.__args__[0]
-                    properties["items"] = self.get_schema_object(f"{parameter}_item", item_type)
-                return properties
+        origin = typing.get_origin(param_type)
+        args = typing.get_args(param_type)
 
-        # check for Pydantic models
+        if origin is list:
+            properties["type"] = "array"
+            if args:
+                item_type = args[0]
+                properties["items"] = self.get_schema_object(f"{parameter}_item", item_type)
+            return properties
+
+        is_union = origin is Union or isinstance(param_type, types.UnionType)
+        if is_union and args:
+            non_none_args = [a for a in args if a is not type(None)]
+            nullable = type(None) in args
+
+            any_of = []
+            for arg in non_none_args:
+                if arg in type_mapping:
+                    any_of.append({"type": type_mapping[arg]})
+                else:
+                    any_of.append(self.get_schema_object(parameter, arg))
+            if nullable:
+                any_of.append({"type": "null"})
+
+            properties["anyOf"] = any_of
+            return properties
+
         if is_pydantic_model(param_type):
             schema, component_schemas = get_pydantic_openapi_schema(param_type)
             if component_schemas:
                 self._merge_component_schemas(component_schemas)
             return schema
 
-        # check for Optional type
-        if param_type.__module__ == "typing":
-            properties["anyOf"] = [{"type": self.get_openapi_type(param_type.__args__[0])}, {"type": "null"}]
-            return properties
-        # check for custom classes and TypedDicts
-        elif inspect.isclass(param_type):
+        if inspect.isclass(param_type):
             properties["type"] = "object"
-
             properties["properties"] = {}
-
-            for e in param_type.__annotations__:
-                properties["properties"][e] = self.get_schema_object(e, param_type.__annotations__[e])
+            if hasattr(param_type, "__annotations__"):
+                for e in param_type.__annotations__:
+                    properties["properties"][e] = self.get_schema_object(e, param_type.__annotations__[e])
+            return properties
 
         properties["type"] = "object"
-
         return properties
 
     def override_openapi(self, openapi_json_spec_path: Path):
